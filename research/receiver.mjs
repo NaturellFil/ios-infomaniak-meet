@@ -9,7 +9,8 @@ if (!positiveRoom || !controlRoom || !userAgent || !proofDirectory) {
     throw new Error('Expected positive room, control room, user agent, and proof directory');
 }
 
-const chromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const chromePath = process.env.CHROME_PATH
+    ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const receiverName = 'SyntheticReceiver';
 const senderName = 'SyntheticIOS';
 
@@ -78,11 +79,29 @@ async function snapshot(page, expectedName) {
 async function ensureReceiverJoined(page, room) {
     await page.goto(meetingUrl(room), { waitUntil: 'domcontentloaded', timeout: 120_000 });
 
+    let current;
+
     for (let attempt = 0; attempt < 90; attempt += 1) {
-        const current = await snapshot(page, senderName);
+        current = await snapshot(page, senderName);
 
         if (current.conference_joined) {
             return current;
+        }
+
+        if (attempt === 5) {
+            const browserChoice = page.getByText('From the browser', { exact: true });
+
+            if (await browserChoice.count()) {
+                await browserChoice.click();
+            }
+        }
+
+        if (attempt === 10) {
+            const continueButton = page.getByText('OK', { exact: true });
+
+            if (await continueButton.count()) {
+                await continueButton.click();
+            }
         }
 
         if (attempt === 20) {
@@ -100,6 +119,19 @@ async function ensureReceiverJoined(page, room) {
 
         await page.waitForTimeout(1_000);
     }
+
+    const diagnostics = {
+        snapshot: current,
+        body_text: (await page.locator('body').innerText()).slice(0, 4_000),
+        name_input_count: await page.locator('#premeeting-name-input').count(),
+        join_button_count: await page.locator('[data-testid="prejoin.joinMeeting"]').count()
+    };
+
+    writeJson(`receiver-not-joined-${room}.json`, diagnostics);
+    await page.screenshot({
+        path: path.join(proofDirectory, `receiver-not-joined-${room}.png`),
+        fullPage: true
+    });
 
     throw new Error(`Receiver did not join room ${room}`);
 }
@@ -138,6 +170,15 @@ try {
         viewport: { width: 1440, height: 1000 }
     });
     const page = await context.newPage();
+
+    page.on('console', message => {
+        if (message.type() === 'error') {
+            console.error(`browser-console: ${message.text()}`);
+        }
+    });
+    page.on('requestfailed', request => {
+        console.error(`request-failed: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? ''}`);
+    });
 
     const positiveReady = await ensureReceiverJoined(page, positiveRoom);
     writeJson('positive-ready.json', positiveReady);
