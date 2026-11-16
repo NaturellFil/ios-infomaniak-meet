@@ -60,7 +60,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build | tee proof/xcodebuild.log
 
-          APP_PATH="$(find "$PWD/.derived/Build/Products" -path '*iphonesimulator/MeetInfomaniak.app' -type d -print -quit)"
+          APP_PATH="$(find "$PWD/.derived/Build/Products" -path '*iphonesimulator/kMeet.app' -type d -print -quit)"
           test -n "$APP_PATH"
           xcrun simctl install "$UDID" "$APP_PATH"
           xcrun simctl privacy "$UDID" grant microphone com.infomaniak.meet
