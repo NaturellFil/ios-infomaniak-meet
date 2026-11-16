@@ -97,7 +97,9 @@ jobs:
           POSITIVE_URL="kmeet://kmeet.infomaniak.com/${POSITIVE_ROOM}?username=SyntheticIOS"
           xcrun simctl openurl "$UDID" "$POSITIVE_URL"
           sleep 2
-          idb ui tap Open --udid "$UDID" --depth 20
+          idb ui tap 275 474 --udid "$UDID"
+          sleep 5
+          xcrun simctl io "$UDID" screenshot proof/positive-after-open.png
 
           for _ in $(seq 1 180); do
             test -f proof/positive-result.json && break
@@ -119,7 +121,7 @@ jobs:
           CONTROL_URL="kmeet://kmeet.infomaniak.com/${CONTROL_ROOM}"
           xcrun simctl openurl "$UDID" "$CONTROL_URL"
           sleep 2
-          idb ui tap Open --udid "$UDID" --depth 20
+          idb ui tap 275 474 --udid "$UDID"
           sleep 10
           xcrun simctl io "$UDID" screenshot proof/control-simulator.png
 
